@@ -3,11 +3,6 @@ export default {
     const url = new URL(request.url);
     const { pathname } = url;
 
-    if (pathname.startsWith("/gss/load/") && request.method === "GET")
-      return handleGssLoad(request, env);
-    if (pathname.startsWith("/gss/save/") && request.method === "POST")
-      return handleGssSave(request, env);
-
     if (pathname === "/msg/send" && request.method === "POST")
       return handleMsgSend(request, env);
     if (pathname === "/msg/poll" && request.method === "POST")
@@ -19,39 +14,6 @@ export default {
 
 async function jsonBody(request) {
   return await request.json();
-}
-
-// --- GSS: store whole world as a blob in KV ---
-
-async function handleGssLoad(request, env) {
-  const url = new URL(request.url);
-  const user = decodeURIComponent(url.pathname.split("/").pop());
-  const key = `gss:${user}`;
-  const text = await env.GSS_KV.get(key);
-  if (!text) {
-    // return a minimal new world
-    const fresh = {
-      files: {
-        "/readme.txt": "New GSS world for " + user + "\n"
-      },
-      config: { user },
-      programs: {}
-    };
-    return jsonResponse(fresh);
-  }
-  return new Response(text, {
-    status: 200,
-    headers: { "Content-Type": "application/json" }
-  });
-}
-
-async function handleGssSave(request, env) {
-  const url = new URL(request.url);
-  const user = decodeURIComponent(url.pathname.split("/").pop());
-  const text = await request.text(); // raw JSON
-  const key = `gss:${user}`;
-  await env.GSS_KV.put(key, text);
-  return jsonResponse({ ok: true });
 }
 
 // --- Messaging: text + file-transfer events in KV ---
@@ -72,6 +34,7 @@ async function handleMsgSend(request, env) {
     text: body.text || "",
     filename: body.filename || null,
     content: body.content || null,
+    to: body.to || null,
     ts
   };
   await env.MSG_KV.put(`msg:${id}`, JSON.stringify(msg));
