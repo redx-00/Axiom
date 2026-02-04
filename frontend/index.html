@@ -8,7 +8,7 @@
     margin: 0;
     padding: 0;
     background: #000;
-    color: #0f0;
+    color: #fff; /* default white text */
     font-family: monospace;
     height: 100%;
     overflow: hidden;
@@ -30,292 +30,55 @@
     flex: 1 1 auto;
     background: transparent;
     border: none;
-    color: #0f0;
+    color: #fff;
     font-family: monospace;
     outline: none;
+  }
+  #file-input, #gpkg-input {
+    display: none;
   }
 </style>
 </head>
 <body>
 <div id="screen"></div>
-<script>
-const BACKEND_BASE = "https://your-worker.example.com"; // set this
-const USER = "andrew"; // or prompt for it
+<input id="file-input" type="file" accept=".gss" />
+<input id="gpkg-input" type="file" accept=".gpkg" />
+<script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+<script type="module">
+import { createTerminal } from './js/core/terminal.js';
+import { createGssManager } from './js/core/gss.js';
+import { createBackend } from './js/core/backend.js';
+import { createProgramLoader } from './js/core/programLoader.js';
+import { createEventBus } from './js/core/eventBus.js';
+import { installCorePrograms } from './js/programs/print.js';
+import { installFsProgram } from './js/programs/fs.js';
+import { installHttpsProgram } from './js/programs/https.js';
+import { installProgramManager } from './js/programs/programManager.js';
+import { installChatRuntime } from './js/programs/chatRuntime.js';
+
+const BACKEND_BASE = "https://gss-message-bus.yourname.workers.dev"; // set this
 
 const screen = document.getElementById("screen");
-let inputLine, promptSpan, cmdInput;
-let gss = null;
-let lastMsgId = 0;
-let currentRemote = null;
+const fileInput = document.getElementById("file-input");
+const gpkgInput = document.getElementById("gpkg-input");
 
-function print(line = "") {
-  const div = document.createElement("div");
-  div.textContent = line;
-  screen.appendChild(div);
-  screen.scrollTop = screen.scrollHeight;
-}
+const eventBus = createEventBus();
+const backend = createBackend(BACKEND_BASE);
+const gssManager = createGssManager(JSZip, fileInput);
+const programLoader = createProgramLoader(JSZip, gssManager, eventBus, backend);
+const terminal = createTerminal(screen, eventBus, gssManager, programLoader, backend, gpkgInput);
 
-function buildPrompt() {
-  const remotePart = currentRemote ? `@${currentRemote.user}-${currentRemote.ip}` : "";
-  return `gss://${USER}${remotePart}> `;
-}
+// install built-in JS programs (not .gpkg): print, fs, https, program manager, chat runtime
+installCorePrograms(eventBus, terminal);
+installFsProgram(eventBus, terminal, gssManager);
+installHttpsProgram(eventBus, backend, terminal);
+installProgramManager(eventBus, terminal, gssManager, programLoader, gpkgInput);
+installChatRuntime(eventBus, backend, gssManager, terminal);
 
-function makeInputLine() {
-  const wrapper = document.createElement("div");
-  wrapper.id = "input-line";
-  const prompt = document.createElement("span");
-  prompt.id = "prompt";
-  prompt.textContent = buildPrompt();
-  const input = document.createElement("input");
-  input.id = "cmd";
-  input.autocomplete = "off";
-  wrapper.appendChild(prompt);
-  wrapper.appendChild(input);
-  screen.appendChild(wrapper);
-  screen.scrollTop = screen.scrollHeight;
-  input.focus();
-  input.addEventListener("keydown", onCommandKey);
-  inputLine = wrapper;
-  promptSpan = prompt;
-  cmdInput = input;
-}
-
-function resetInputLine() {
-  if (inputLine) {
-    cmdInput.removeEventListener("keydown", onCommandKey);
-    inputLine.removeAttribute("id");
-    cmdInput.setAttribute("disabled", "disabled");
-  }
-  makeInputLine();
-}
-
-function onCommandKey(e) {
-  if (e.key === "Enter") {
-    const text = cmdInput.value.trim();
-    if (text.length === 0) {
-      resetInputLine();
-      return;
-    }
-    cmdInput.removeEventListener("keydown", onCommandKey);
-    cmdInput.setAttribute("disabled", "disabled");
-    handleCommand(text).then(() => resetInputLine());
-  }
-}
-
-async function api(path, body, method = "POST") {
-  const url = BACKEND_BASE + path;
-  const opts = { method, headers: {} };
-  if (body && method !== "GET") {
-    opts.headers["Content-Type"] = "application/json";
-    opts.body = JSON.stringify(body);
-  }
-  const res = await fetch(url, opts);
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return await res.json();
-}
-
-// --- GSS local FS helpers ---
-
-function ensureGss() {
-  if (!gss) gss = { files: {}, config: { user: USER }, programs: {} };
-}
-
-function readLocalFile(path) {
-  ensureGss();
-  return gss.files[path] ?? null;
-}
-
-function writeLocalFile(path, content) {
-  ensureGss();
-  gss.files[path] = content;
-}
-
-function listLocalFiles(prefix = "/") {
-  ensureGss();
-  const files = [];
-  for (const key of Object.keys(gss.files)) {
-    if (key.startsWith(prefix)) {
-      files.push({ name: key, size: (gss.files[key] || "").length });
-    }
-  }
-  return files;
-}
-
-// --- Commands ---
-
-async function handleCommand(line) {
-  print(buildPrompt() + line);
-  const [cmd, ...rest] = tokenize(line);
-  if (!cmd) return;
-
-  try {
-    switch (cmd) {
-      case "help":
-        print("Commands:");
-        print("  help");
-        print("  ls [path]");
-        print("  cat <path>");
-        print("  write <path> <text>");
-        print("  connect <user>-<ip>:/<path>");
-        print("  msg <room> <text>");
-        print("  sendfile <user>-<ip>:/<path> <localpath>");
-        print("  savegss");
-        print("  loadgss");
-        break;
-
-      case "ls": {
-        const path = rest[0] || "/";
-        const files = listLocalFiles(path);
-        files.forEach(f => print(`${f.name}  ${f.size}`));
-        break;
-      }
-
-      case "cat": {
-        const path = rest[0];
-        if (!path) { print("usage: cat <path>"); break; }
-        const content = readLocalFile(path);
-        if (content == null) print("not found");
-        else print(content);
-        break;
-      }
-
-      case "write": {
-        const path = rest[0];
-        const text = rest.slice(1).join(" ");
-        if (!path) { print("usage: write <path> <text>"); break; }
-        writeLocalFile(path, text);
-        print(`wrote ${path}`);
-        break;
-      }
-
-      case "connect": {
-        const target = rest[0];
-        if (!target) { print("usage: connect <user>-<ip>:/<path>"); break; }
-        const parsed = parseConnectTarget(target);
-        if (!parsed) { print("invalid target"); break; }
-        currentRemote = parsed;
-        promptSpan.textContent = buildPrompt();
-        print(`connected to ${parsed.user}-${parsed.ip}:${parsed.path}`);
-        break;
-      }
-
-      case "msg": {
-        const room = rest[0];
-        const text = rest.slice(1).join(" ");
-        if (!room || !text) { print("usage: msg <room> <text>"); break; }
-        await api("/msg/send", {
-          room,
-          from: USER,
-          type: "text",
-          text
-        });
-        print(`[${room}] ${USER}: ${text}`);
-        break;
-      }
-
-      case "sendfile": {
-        const target = rest[0];
-        const localPath = rest[1];
-        if (!target || !localPath) {
-          print("usage: sendfile <user>-<ip>:/<path> <localpath>");
-          break;
-        }
-        const parsed = parseConnectTarget(target);
-        if (!parsed) { print("invalid target"); break; }
-        const content = readLocalFile(localPath);
-        if (content == null) { print("local file not found"); break; }
-        await api("/msg/send", {
-          room: "files",
-          from: USER,
-          type: "file-transfer",
-          filename: parsed.path,
-          content,
-          to: parsed.user
-        });
-        print(`sent ${localPath} to ${parsed.user}-${parsed.ip}:${parsed.path}`);
-        break;
-      }
-
-      case "savegss": {
-        ensureGss();
-        await fetch(BACKEND_BASE + "/gss/save/" + encodeURIComponent(USER), {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(gss)
-        });
-        print("gss saved");
-        break;
-      }
-
-      case "loadgss": {
-        const res = await api("/gss/load/" + encodeURIComponent(USER), null, "GET");
-        gss = res;
-        print("gss loaded");
-        break;
-      }
-
-      default:
-        print(`unknown command: ${cmd}`);
-    }
-  } catch (err) {
-    print(`error: ${err.message}`);
-  }
-}
-
-function tokenize(line) {
-  return line.split(/\s+/);
-}
-
-function parseConnectTarget(str) {
-  const [userIp, pathPart] = str.split(":");
-  if (!userIp || !pathPart) return null;
-  const [user, ip] = userIp.split("-");
-  if (!user || !ip) return null;
-  return { user, ip, path: pathPart || "/" };
-}
-
-// --- Message poller: text + file-transfer ---
-
-async function pollLoop() {
-  while (true) {
-    try {
-      const res = await api("/msg/poll", { since: lastMsgId });
-      (res.messages || []).forEach(m => {
-        lastMsgId = Math.max(lastMsgId, m.id || 0);
-        if (m.type === "text") {
-          print(`[${m.room}] ${m.from}: ${m.text}`);
-        } else if (m.type === "file-transfer") {
-          // simple rule: if 'to' matches USER, accept
-          if (m.to && m.to !== USER) return;
-          const path = m.filename || "/inbox/file-" + m.id;
-          writeLocalFile(path, m.content || "");
-          print(`[file] received ${path} from ${m.from}`);
-        }
-      });
-    } catch (e) {
-      // ignore for now
-    }
-    await new Promise(r => setTimeout(r, 2000));
-  }
-}
-
-// --- Boot ---
-
-(async function boot() {
-  print("GSS Terminal");
-  print("Loading GSS world for " + USER + "...");
-  try {
-    const res = await api("/gss/load/" + encodeURIComponent(USER), null, "GET");
-    gss = res;
-    print("Loaded.");
-  } catch (e) {
-    print("Failed to load, starting fresh.");
-    gss = { files: {}, config: { user: USER }, programs: {} };
-  }
-  print("Type 'help' for commands.");
-  makeInputLine();
-  pollLoop();
-})();
+terminal.print("GSS Terminal");
+terminal.print("Text is white by default. Colors are supported.");
+terminal.print("Use 'loadgss' to load a .gss, or 'newgss' to create one.");
+terminal.showPrompt();
 </script>
 </body>
 </html>
