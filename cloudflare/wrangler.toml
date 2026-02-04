@@ -1,0 +1,11 @@
+name = "gss-backend"
+main = "src/index.js"
+compatibility_date = "2024-01-01"
+
+[[kv_namespaces]]
+binding = "GSS_KV"
+id = "your-gss-kv-id"
+
+[[kv_namespaces]]
+binding = "MSG_KV"
+id = "your-msg-kv-id"
