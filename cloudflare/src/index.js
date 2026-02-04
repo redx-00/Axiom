@@ -16,8 +16,6 @@ async function jsonBody(request) {
   return await request.json();
 }
 
-// --- Messaging: text + file-transfer events in KV ---
-
 async function handleMsgSend(request, env) {
   const body = await jsonBody(request);
   const room = body.room || "general";
