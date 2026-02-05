@@ -15,7 +15,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    cursor: none; /* mouse hidden by default */
+    cursor: none; /* hidden by default */
   }
 
   #loader {
@@ -24,6 +24,9 @@
 
   #screen {
     display: none;
+    position: absolute;
+    top: 0;
+    left: 0;
     box-sizing: border-box;
     padding: 12px;
     height: 100%;
@@ -42,7 +45,9 @@
     position: absolute;
     top: 0;
     left: 0;
-    pointer-events: none; /* world can enable if needed */
+    width: 100vw;
+    height: 100vh;
+    pointer-events: none;
   }
 </style>
 </head>
@@ -57,12 +62,11 @@
 <div id="screen"></div>
 <input id="file-input" type="file" accept=".ax" />
 
-<!-- JSZip -->
 <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 
 <script type="module">
 /* ============================================================
-   AXIOM RUNTIME
+   AXIOM RUNTIME — SINGLE MODE
 ============================================================ */
 
 const loader = document.getElementById("loader");
@@ -77,10 +81,13 @@ let inputStyle = { fg: null, bg: null };
 let canvas = null;
 let ctx = null;
 let mouseEnabled = false;
+let mode = "text"; // "text" or "graphics"
 
-/* ---------- Printing ---------- */
+/* ---------- Printing (text mode only) ---------- */
 
 function print(text = "", opts = {}) {
+  if (mode !== "text") return;
+
   const div = document.createElement("div");
   const span = document.createElement("span");
   span.textContent = text;
@@ -108,21 +115,25 @@ function printError(label, err) {
 /* ---------- Screen / theme ---------- */
 
 function clearScreen() {
-  screen.innerHTML = "";
-  inputLine = null;
-  inputBox = null;
+  if (mode === "text") {
+    screen.innerHTML = "";
+    inputLine = null;
+    inputBox = null;
+  }
 }
 
 function setTheme({ fg, bg }) {
-  if (fg) screen.style.color = fg;
-  if (bg) screen.style.backgroundColor = bg;
+  if (mode === "text") {
+    if (fg) screen.style.color = fg;
+    if (bg) screen.style.backgroundColor = bg;
+  }
 }
 
 function setTitle(text) {
   document.title = text;
 }
 
-/* ---------- Input handling ---------- */
+/* ---------- Input handling (text mode only) ---------- */
 
 function applyInputStyle() {
   if (!inputBox) return;
@@ -131,17 +142,21 @@ function applyInputStyle() {
 }
 
 function attachInputLineIfNeeded() {
+  if (mode !== "text") return;
   if (!inputLine || !inputBox) return;
+
   if (inputLine.parentNode !== screen) {
     screen.appendChild(inputLine);
   } else {
     screen.appendChild(inputLine);
   }
+
   applyInputStyle();
   inputBox.focus();
 }
 
 function createInputLine() {
+  if (mode !== "text") return;
   if (inputLine) return;
 
   inputLine = document.createElement("div");
@@ -174,19 +189,16 @@ function createInputLine() {
   attachInputLineIfNeeded();
 }
 
-/* ---------- Graphics ---------- */
+/* ---------- Graphics mode ---------- */
 
 function enableGraphics() {
+  mode = "graphics";
+  screen.style.display = "none";
+
   if (!canvas) {
     canvas = document.createElement("canvas");
-    canvas.style.position = "absolute";
-    canvas.style.top = "0";
-    canvas.style.left = "0";
-    canvas.style.width = "100vw";
-    canvas.style.height = "100vh";
-    canvas.style.pointerEvents = "none"; // world can enable if needed
+    canvas.style.pointerEvents = "none";
     document.body.appendChild(canvas);
-
     ctx = canvas.getContext("2d");
 
     function resize() {
@@ -201,13 +213,11 @@ function enableGraphics() {
   return ctx;
 }
 
-
 /* ---------- Mouse ---------- */
 
 function enableMouse(options = {}) {
   mouseEnabled = true;
   document.body.style.cursor = options.cursor || "default";
-  canvas.style.pointerEvents = "auto";
 
   const onMove = options.onMove || (() => {});
   const onDown = options.onDown || (() => {});
@@ -235,6 +245,7 @@ const axiom = {
   print,
   clear: clearScreen,
   onInput(fn) {
+    if (mode !== "text") throw new Error("Input not allowed in graphics mode");
     inputCallback = fn;
     if (!inputLine) createInputLine();
   },
@@ -248,7 +259,7 @@ const axiom = {
   enableMouse
 };
 
-/* ---------- Global error hooks ---------- */
+/* ---------- Error hooks ---------- */
 
 window.onerror = (msg, src, line, col, err) => {
   screen.style.display = "block";
@@ -276,7 +287,6 @@ fileInput.onchange = async e => {
     const buf = await file.arrayBuffer();
     const zip = await JSZip.loadAsync(buf);
 
-    /* ---------- Load init.axconf ---------- */
     const confFile = zip.file("init.axconf");
     if (!confFile) {
       screen.style.display = "block";
@@ -297,10 +307,24 @@ fileInput.onchange = async e => {
     }
 
     const entry = config.entry || "main.js";
-    const allowGraphics = config.graphics === true;
+    const graphicsMode = config.graphics === true;
+    const textMode = config.text !== false; // default true
     const allowMouse = config.mouse === true;
 
-    /* ---------- Load entry script ---------- */
+    if (graphicsMode && textMode) {
+      screen.style.display = "block";
+      loader.style.display = "none";
+      printError("Config error", "Cannot enable both text and graphics mode");
+      return;
+    }
+
+    mode = graphicsMode ? "graphics" : "text";
+
+    if (!textMode) screen.style.display = "none";
+    if (textMode) screen.style.display = "block";
+
+    if (!allowMouse) axiom.enableMouse = () => { throw new Error("Mouse disabled by init.axconf"); };
+
     const entryFile = zip.file(entry);
     if (!entryFile) {
       screen.style.display = "block";
@@ -335,13 +359,7 @@ fileInput.onchange = async e => {
     }
 
     loader.style.display = "none";
-    screen.style.display = "block";
 
-    /* ---------- Restrict features based on config ---------- */
-    if (!allowGraphics) axiom.enableGraphics = () => { throw new Error("Graphics disabled by init.axconf"); };
-    if (!allowMouse) axiom.enableMouse = () => { throw new Error("Mouse disabled by init.axconf"); };
-
-    /* ---------- Run world ---------- */
     try {
       mod.start(axiom);
     } catch (err) {
