@@ -1,7 +1,0 @@
-name = "axiomworkers"
-main = "src/index.js"
-compatibility_date = "2024-01-01"
-
-[[kv_namespaces]]
-binding = "MSG_KV"
-id = "07cbaa1952a84e818e5cf29906d26d1c"
