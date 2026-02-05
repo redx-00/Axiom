@@ -15,6 +15,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
+    cursor: none; /* mouse hidden by default */
   }
 
   #loader {
@@ -35,6 +36,13 @@
 
   #file-input {
     display: none;
+  }
+
+  canvas {
+    position: absolute;
+    top: 0;
+    left: 0;
+    pointer-events: none; /* world can enable if needed */
   }
 </style>
 </head>
@@ -66,6 +74,9 @@ let inputCallback = null;
 let inputLine = null;
 let inputBox = null;
 let inputStyle = { fg: null, bg: null };
+let canvas = null;
+let ctx = null;
+let mouseEnabled = false;
 
 /* ---------- Printing ---------- */
 
@@ -163,6 +174,47 @@ function createInputLine() {
   attachInputLineIfNeeded();
 }
 
+/* ---------- Graphics ---------- */
+
+function enableGraphics(width, height) {
+  if (!canvas) {
+    canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    canvas.style.pointerEvents = "none";
+    document.body.appendChild(canvas);
+    ctx = canvas.getContext("2d");
+  }
+  return ctx;
+}
+
+/* ---------- Mouse ---------- */
+
+function enableMouse(options = {}) {
+  mouseEnabled = true;
+  document.body.style.cursor = options.cursor || "default";
+  canvas.style.pointerEvents = "auto";
+
+  const onMove = options.onMove || (() => {});
+  const onDown = options.onDown || (() => {});
+  const onUp = options.onUp || (() => {});
+
+  window.addEventListener("mousemove", e => {
+    if (!mouseEnabled) return;
+    onMove(e.clientX, e.clientY);
+  });
+
+  window.addEventListener("mousedown", e => {
+    if (!mouseEnabled) return;
+    onDown(e.clientX, e.clientY);
+  });
+
+  window.addEventListener("mouseup", e => {
+    if (!mouseEnabled) return;
+    onUp(e.clientX, e.clientY);
+  });
+}
+
 /* ---------- Axiom API ---------- */
 
 const axiom = {
@@ -177,7 +229,9 @@ const axiom = {
   setInputStyle({ fg, bg }) {
     inputStyle = { fg: fg || null, bg: bg || null };
     applyInputStyle();
-  }
+  },
+  enableGraphics,
+  enableMouse
 };
 
 /* ---------- Global error hooks ---------- */
@@ -195,7 +249,7 @@ window.onunhandledrejection = event => {
 };
 
 /* ============================================================
-   LOAD .AX FILE
+   LOAD .AX FILE + init.axconf
 ============================================================ */
 
 loadBtn.onclick = () => fileInput.click();
@@ -208,15 +262,40 @@ fileInput.onchange = async e => {
     const buf = await file.arrayBuffer();
     const zip = await JSZip.loadAsync(buf);
 
-    const mainJs = zip.file("main.js");
-    if (!mainJs) {
+    /* ---------- Load init.axconf ---------- */
+    const confFile = zip.file("init.axconf");
+    if (!confFile) {
       screen.style.display = "block";
       loader.style.display = "none";
-      printError("main.js error", "Invalid .ax file: missing main.js");
+      printError("Config error", "Missing init.axconf");
       return;
     }
 
-    const code = await mainJs.async("string");
+    const confText = await confFile.async("string");
+    let config = {};
+    try {
+      config = JSON.parse(confText);
+    } catch (err) {
+      screen.style.display = "block";
+      loader.style.display = "none";
+      printError("Config parse error", err);
+      return;
+    }
+
+    const entry = config.entry || "main.js";
+    const allowGraphics = config.graphics === true;
+    const allowMouse = config.mouse === true;
+
+    /* ---------- Load entry script ---------- */
+    const entryFile = zip.file(entry);
+    if (!entryFile) {
+      screen.style.display = "block";
+      loader.style.display = "none";
+      printError("Entry error", `Missing entry script: ${entry}`);
+      return;
+    }
+
+    const code = await entryFile.async("string");
 
     const blob = new Blob([code], { type: "text/javascript" });
     const url = URL.createObjectURL(blob);
@@ -227,7 +306,7 @@ fileInput.onchange = async e => {
     } catch (err) {
       screen.style.display = "block";
       loader.style.display = "none";
-      printError("Error importing main.js", err);
+      printError("Error importing entry script", err);
       URL.revokeObjectURL(url);
       return;
     }
@@ -237,18 +316,24 @@ fileInput.onchange = async e => {
     if (typeof mod.start !== "function") {
       screen.style.display = "block";
       loader.style.display = "none";
-      printError("main.js error", "main.js must export function start(axiom)");
+      printError("Entry error", `${entry} must export function start(axiom)`);
       return;
     }
 
     loader.style.display = "none";
     screen.style.display = "block";
 
+    /* ---------- Restrict features based on config ---------- */
+    if (!allowGraphics) axiom.enableGraphics = () => { throw new Error("Graphics disabled by init.axconf"); };
+    if (!allowMouse) axiom.enableMouse = () => { throw new Error("Mouse disabled by init.axconf"); };
+
+    /* ---------- Run world ---------- */
     try {
       mod.start(axiom);
     } catch (err) {
       printError("Error in start(axiom)", err);
     }
+
   } catch (err) {
     screen.style.display = "block";
     loader.style.display = "none";
@@ -258,4 +343,3 @@ fileInput.onchange = async e => {
 </script>
 </body>
 </html>
-
