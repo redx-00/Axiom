@@ -67,7 +67,7 @@ let inputLine = null;
 let inputBox = null;
 let inputStyle = { fg: null, bg: null };
 
-/* ---------- Error printing ---------- */
+/* ---------- Printing ---------- */
 
 function print(text = "", opts = {}) {
   const div = document.createElement("div");
@@ -136,7 +136,6 @@ function createInputLine() {
   inputLine = document.createElement("div");
   inputBox = document.createElement("input");
 
-  // raw input: no border, no padding, no placeholder
   inputBox.autocomplete = "off";
   inputBox.style.border = "none";
   inputBox.style.outline = "none";
@@ -164,7 +163,8 @@ function createInputLine() {
   attachInputLineIfNeeded();
 }
 
-/* Axiom API exposed to .ax worlds */
+/* ---------- Axiom API ---------- */
+
 const axiom = {
   print,
   clear: clearScreen,
@@ -177,12 +177,6 @@ const axiom = {
   setInputStyle({ fg, bg }) {
     inputStyle = { fg: fg || null, bg: bg || null };
     applyInputStyle();
-  },
-  fullscreen() {
-    const el = document.documentElement;
-    if (el.requestFullscreen) el.requestFullscreen();
-    else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
-    else if (el.msRequestFullscreen) el.msRequestFullscreen();
   }
 };
 
@@ -201,28 +195,10 @@ window.onunhandledrejection = event => {
 };
 
 /* ============================================================
-   FULLSCREEN ON BUTTON CLICK (A1)
-============================================================ */
-
-async function requestFullscreenFromClick() {
-  const el = document.documentElement;
-  try {
-    if (el.requestFullscreen) await el.requestFullscreen();
-    else if (el.webkitRequestFullscreen) await el.webkitRequestFullscreen();
-    else if (el.msRequestFullscreen) await el.msRequestFullscreen();
-  } catch (e) {
-    // ignore; browser may block, but we tried
-  }
-}
-
-/* ============================================================
    LOAD .AX FILE
 ============================================================ */
 
-loadBtn.onclick = async () => {
-  await requestFullscreenFromClick();
-  fileInput.click();
-};
+loadBtn.onclick = () => fileInput.click();
 
 fileInput.onchange = async e => {
   const file = e.target.files[0];
@@ -282,3 +258,4 @@ fileInput.onchange = async e => {
 </script>
 </body>
 </html>
+
