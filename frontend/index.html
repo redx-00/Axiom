@@ -8,7 +8,7 @@
     margin: 0;
     padding: 0;
     background: #000;
-    color: #fff; /* default white text */
+    color: #fff;
     font-family: monospace;
     height: 100%;
     overflow: hidden;
@@ -48,15 +48,16 @@
 import { createTerminal } from './js/core/terminal.js';
 import { createGssManager } from './js/core/gss.js';
 import { createBackend } from './js/core/backend.js';
-import { createProgramLoader } from './js/core/programLoader.js';
 import { createEventBus } from './js/core/eventBus.js';
-import { installCorePrograms } from './js/programs/print.js';
+import { createProgramLoader } from './js/core/programLoader.js';
+
+import { installPrintProgram } from './js/programs/print.js';
 import { installFsProgram } from './js/programs/fs.js';
 import { installHttpsProgram } from './js/programs/https.js';
-import { installProgramManager } from './js/programs/programManager.js';
-import { installChatRuntime } from './js/programs/chatRuntime.js';
+import { installProgProgram } from './js/programs/prog.js';
+import { installRequestsRuntime } from './js/programs/requestsRuntime.js';
 
-const BACKEND_BASE = "https://gss-message-bus.yourname.workers.dev"; // set this
+const BACKEND_BASE = "https://gss-request-bus.yourname.workers.dev"; // set this
 
 const screen = document.getElementById("screen");
 const fileInput = document.getElementById("file-input");
@@ -66,18 +67,34 @@ const eventBus = createEventBus();
 const backend = createBackend(BACKEND_BASE);
 const gssManager = createGssManager(JSZip, fileInput);
 const programLoader = createProgramLoader(JSZip, gssManager, eventBus, backend);
-const terminal = createTerminal(screen, eventBus, gssManager, programLoader, backend, gpkgInput);
+const terminal = createTerminal(screen, eventBus, gssManager, programLoader);
 
-// install built-in JS programs (not .gpkg): print, fs, https, program manager, chat runtime
-installCorePrograms(eventBus, terminal);
+installPrintProgram(eventBus, terminal);
 installFsProgram(eventBus, terminal, gssManager);
 installHttpsProgram(eventBus, backend, terminal);
-installProgramManager(eventBus, terminal, gssManager, programLoader, gpkgInput);
-installChatRuntime(eventBus, backend, gssManager, terminal);
+installProgProgram(eventBus, terminal, gssManager, programLoader, gpkgInput);
+installRequestsRuntime(eventBus, backend, gssManager, terminal);
 
-terminal.print("GSS Terminal");
-terminal.print("Text is white by default. Colors are supported.");
-terminal.print("Use 'loadgss' to load a .gss, or 'newgss' to create one.");
+function banner() {
+  const meta = gssManager.getMeta();
+  const user = meta?.username || "unknown";
+  const ip = meta?.fakeIp || "0.0.0.0";
+  const oobe = meta?.oobeDone ? "Completed" : "Pending";
+
+  terminal.print("──────────────────────────────────────────────");
+  terminal.print("   GSS TERMINAL — LOCAL WORLD ENVIRONMENT");
+  terminal.print("──────────────────────────────────────────────");
+  terminal.print(`User: ${user}    IP: ${ip}`);
+  terminal.print(`OOBE: ${oobe}`);
+  terminal.print("");
+  terminal.print("Type 'help' for commands.");
+  terminal.print("Type 'prog list' to see editable programs.");
+  terminal.print("Type 'programs' to see installed .gpkg packages.");
+  terminal.print("──────────────────────────────────────────────");
+  terminal.print("");
+}
+
+banner();
 terminal.showPrompt();
 </script>
 </body>
