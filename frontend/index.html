@@ -43,21 +43,643 @@
 <div id="screen"></div>
 <input id="file-input" type="file" accept=".gss" />
 <input id="gpkg-input" type="file" accept=".gpkg" />
+
+<!-- JSZip from CDN -->
 <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+
 <script type="module">
-import { createTerminal } from './js/core/terminal.js';
-import { createGssManager } from './js/core/gss.js';
-import { createBackend } from './js/core/backend.js';
-import { createEventBus } from './js/core/eventBus.js';
-import { createProgramLoader } from './js/core/programLoader.js';
+/* ============================================================
+   EVENT BUS
+============================================================ */
+function createEventBus() {
+  const handlers = {};
+  return {
+    on(event, fn) {
+      if (!handlers[event]) handlers[event] = [];
+      handlers[event].push(fn);
+    },
+    emit(event, payload) {
+      (handlers[event] || []).forEach(fn => fn(payload));
+    },
+    async emitAsync(event, payload) {
+      let handled = false;
+      for (const fn of (handlers[event] || [])) {
+        const res = await fn(payload);
+        if (res === true) handled = true;
+      }
+      return handled;
+    }
+  };
+}
 
-import { installPrintProgram } from './js/programs/print.js';
-import { installFsProgram } from './js/programs/fs.js';
-import { installHttpsProgram } from './js/programs/https.js';
-import { installProgProgram } from './js/programs/prog.js';
-import { installRequestsRuntime } from './js/programs/requestsRuntime.js';
+/* ============================================================
+   BACKEND CLIENT
+============================================================ */
+function createBackend(baseUrl) {
+  async function api(path, body) {
+    const res = await fetch(baseUrl + path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    return await res.json();
+  }
+  return {
+    sendRequest: (fromUser, fromIp, toUser, toIp, type, payload) =>
+      api("/request/send", { fromUser, fromIp, toUser, toIp, type, payload }),
+    pollRequests: since =>
+      api("/request/poll", { since })
+  };
+}
 
-const BACKEND_BASE = "https://axiomworkers.a-villa232925.workers.dev/"; // set this
+/* ============================================================
+   GSS MANAGER (ZIP)
+============================================================ */
+function createGssManager(JSZip, fileInput) {
+  let zip = null;
+  let meta = null;
+
+  function randomFakeIp() {
+    return `10.${Math.floor(Math.random()*256)}.${Math.floor(Math.random()*256)}.${Math.floor(Math.random()*256)}`;
+  }
+
+  async function createFresh() {
+    zip = new JSZip();
+    meta = {
+      username: prompt("Enter username:", "user") || "user",
+      fakeIp: randomFakeIp(),
+      createdAt: Date.now(),
+      oobeDone: false
+    };
+    zip.file("meta.json", JSON.stringify(meta, null, 2));
+    zip.folder("files").file("readme.txt", `Welcome, ${meta.username}.\n`);
+    zip.folder("programs");
+    zip.folder("program-src");
+    zip.folder("trusted_keys");
+  }
+
+  async function loadFromDisk() {
+    return new Promise(resolve => {
+      fileInput.onchange = async e => {
+        const file = e.target.files[0];
+        if (!file) return resolve();
+        const buf = await file.arrayBuffer();
+        if (buf.byteLength === 0) {
+          await createFresh();
+          await saveToDisk();
+          return resolve();
+        }
+        zip = await JSZip.loadAsync(buf);
+        const metaFile = zip.file("meta.json");
+        if (!metaFile) {
+          await createFresh();
+          await saveToDisk();
+          return resolve();
+        }
+        meta = JSON.parse(await metaFile.async("string"));
+        resolve();
+      };
+      fileInput.click();
+    });
+  }
+
+  async function saveToDisk() {
+    if (!zip || !meta) await createFresh();
+    zip.file("meta.json", JSON.stringify(meta, null, 2));
+    const blob = await zip.generateAsync({ type: "blob" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = (meta.username || "world") + ".gss";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  return {
+    getMeta: () => meta,
+    createFresh,
+    loadFromDisk,
+    saveToDisk,
+    setUsername: name => { if (meta) meta.username = name; },
+
+    async readFile(path) {
+      if (!zip) return null;
+      const clean = path.replace(/^\//, "");
+      const f = zip.file("files/" + clean);
+      return f ? await f.async("string") : null;
+    },
+
+    async writeFile(path, content) {
+      if (!zip) await createFresh();
+      const clean = path.replace(/^\//, "");
+      zip.folder("files").file(clean, content);
+    },
+
+    async listFiles(prefix = "/") {
+      if (!zip) return [];
+      const clean = prefix.replace(/^\//, "");
+      const folder = "files/" + clean;
+      const out = [];
+      zip.forEach((rel, file) => {
+        if (rel.startsWith(folder)) {
+          out.push({
+            name: "/" + rel.substring("files/".length),
+            size: file._data && file._data.uncompressedSize || 0
+          });
+        }
+      });
+      return out;
+    },
+
+    async getProgramNames() {
+      if (!zip) return [];
+      const out = [];
+      zip.forEach((rel, file) => {
+        if (rel.startsWith("programs/") && rel.endsWith(".gpkg")) {
+          out.push(rel.substring("programs/".length, rel.length - ".gpkg".length));
+        }
+      });
+      return out;
+    },
+
+    async getProgramBytes(name) {
+      if (!zip) return null;
+      const f = zip.file(`programs/${name}.gpkg`);
+      return f ? await f.async("arraybuffer") : null;
+    },
+
+    async installProgramFromBytes(name, buf) {
+      if (!zip) await createFresh();
+      zip.folder("programs").file(`${name}.gpkg`, buf);
+    },
+
+    async readProgramSource(name, file) {
+      if (!zip) return null;
+      const f = zip.file(`program-src/${name}/${file}`);
+      return f ? await f.async("string") : null;
+    },
+
+    async writeProgramSource(name, file, content) {
+      if (!zip) await createFresh();
+      zip.folder(`program-src/${name}`).file(file, content);
+    },
+
+    async listProgramSourceNames() {
+      if (!zip) return [];
+      const out = new Set();
+      zip.forEach((rel, file) => {
+        if (rel.startsWith("program-src/") && rel.endsWith("/")) {
+          out.add(rel.substring("program-src/".length, rel.length - 1));
+        }
+      });
+      return [...out];
+    }
+  };
+}
+
+/* ============================================================
+   TERMINAL (bg color + history)
+============================================================ */
+function createTerminal(screen, eventBus, gssManager, programLoader) {
+  let inputLine, promptSpan, cmdInput;
+  const history = [];
+  let historyIndex = -1;
+
+  function print(text = "", options = {}) {
+    const div = document.createElement("div");
+
+    if (Array.isArray(text)) {
+      text.forEach(seg => {
+        const span = document.createElement("span");
+        span.textContent = seg.text;
+        if (seg.color) span.style.color = seg.color;
+        if (seg.bgColor) span.style.backgroundColor = seg.bgColor;
+        div.appendChild(span);
+      });
+    } else {
+      const span = document.createElement("span");
+      span.textContent = text;
+      if (options.color) span.style.color = options.color;
+      if (options.bgColor) span.style.backgroundColor = options.bgColor;
+      div.appendChild(span);
+    }
+
+    screen.appendChild(div);
+    screen.scrollTop = screen.scrollHeight;
+  }
+
+  function promptText() {
+    const meta = gssManager.getMeta();
+    if (!meta) return "[?:0.0.0.0] $ ";
+    return `[${meta.username}@${meta.fakeIp}] $ `;
+  }
+
+  function showPrompt() {
+    const wrapper = document.createElement("div");
+    wrapper.id = "input-line";
+    const prompt = document.createElement("span");
+    prompt.id = "prompt";
+    prompt.textContent = promptText();
+    const input = document.createElement("input");
+    input.id = "cmd";
+    input.autocomplete = "off";
+    wrapper.appendChild(prompt);
+    wrapper.appendChild(input);
+    screen.appendChild(wrapper);
+    screen.scrollTop = screen.scrollHeight;
+    input.focus();
+    input.addEventListener("keydown", onKey);
+    inputLine = wrapper;
+    promptSpan = prompt;
+    cmdInput = input;
+  }
+
+  function resetPrompt() {
+    if (inputLine) {
+      cmdInput.removeEventListener("keydown", onKey);
+      cmdInput.disabled = true;
+    }
+    showPrompt();
+  }
+
+  function onKey(e) {
+    if (e.key === "Enter") {
+      const text = cmdInput.value.trim();
+      if (text) {
+        history.push(text);
+        historyIndex = history.length;
+      }
+      cmdInput.removeEventListener("keydown", onKey);
+      cmdInput.disabled = true;
+      handleCommand(text).then(() => resetPrompt());
+    } else if (e.key === "ArrowUp") {
+      if (!history.length) return;
+      historyIndex = Math.max(0, historyIndex - 1);
+      cmdInput.value = history[historyIndex] || "";
+      e.preventDefault();
+    } else if (e.key === "ArrowDown") {
+      if (!history.length) return;
+      historyIndex = Math.min(history.length, historyIndex + 1);
+      cmdInput.value = history[historyIndex] || "";
+      e.preventDefault();
+    }
+  }
+
+  async function handleCommand(line) {
+    print(promptText() + line);
+    const [cmd, ...args] = line.split(/\s+/);
+    if (!cmd) return;
+
+    if (cmd === "help") {
+      const topic = args[0];
+      if (!topic) {
+        print("Commands:");
+        print("  help [topic]");
+        print("  newgss");
+        print("  loadgss");
+        print("  savegss");
+        print("  setuser <name>");
+        print("  showmeta");
+        print("  programs");
+        print("  prog list/new/edit/build/run <name>");
+        print("  ls [path]");
+        print("  cat <path>");
+        print("  write <path> <text>");
+        print("  msg <user>-<ip> <text>");
+        print("  sendfile <user>-<ip>:/<path> <localpath>");
+        eventBus.emit("help-extra");
+        return;
+      } else {
+        eventBus.emit("help:" + topic);
+        return;
+      }
+    }
+
+    if (cmd === "newgss") {
+      await gssManager.createFresh();
+      print("Created new .gss. Use 'savegss' to download it.", { color: "#5f5" });
+      promptSpan.textContent = promptText();
+      return;
+    }
+
+    if (cmd === "loadgss") {
+      await gssManager.loadFromDisk();
+      print("Loaded .gss from disk.", { color: "#5f5" });
+      promptSpan.textContent = promptText();
+      await programLoader.loadAllPrograms();
+      return;
+    }
+
+    if (cmd === "savegss") {
+      await gssManager.saveToDisk();
+      print("Downloaded .gss file.", { color: "#5f5" });
+      return;
+    }
+
+    if (cmd === "setuser") {
+      const name = args[0];
+      if (!name) { print("usage: setuser <name>", { color: "#f55" }); return; }
+      gssManager.setUsername(name);
+      promptSpan.textContent = promptText();
+      print(`username set to ${name}`, { color: "#5f5" });
+      return;
+    }
+
+    if (cmd === "showmeta") {
+      print(JSON.stringify(gssManager.getMeta(), null, 2));
+      return;
+    }
+
+    const handled = await eventBus.emitAsync("command", { cmd, args, line });
+    if (!handled) {
+      print(`Unknown command: ${cmd}`, { color: "#f55" });
+      print("Type 'help' for a list of commands.");
+    }
+  }
+
+  return { print, showPrompt };
+}
+
+/* ============================================================
+   PROGRAM LOADER
+============================================================ */
+function createProgramLoader(JSZip, gssManager, eventBus, backend) {
+  async function loadAllPrograms() {
+    const names = await gssManager.getProgramNames();
+    for (const n of names) await loadProgram(n);
+  }
+
+  async function loadProgram(name) {
+    const buf = await gssManager.getProgramBytes(name);
+    if (!buf) return;
+    const zip = await JSZip.loadAsync(buf);
+    const manifest = JSON.parse(await zip.file("manifest.json").async("string"));
+    const code = await zip.file("code.js").async("string");
+    // signature verification could go here
+
+    const blob = new Blob([code], { type: "text/javascript" });
+    const url = URL.createObjectURL(blob);
+    const mod = await import(url);
+    URL.revokeObjectURL(url);
+
+    if (typeof mod.init === "function") {
+      mod.init({
+        on: eventBus.on,
+        emit: eventBus.emit,
+        backend,
+        gss: gssManager
+      });
+    }
+  }
+
+  return { loadAllPrograms, loadProgram };
+}
+
+/* ============================================================
+   BUILT-IN PROGRAMS
+============================================================ */
+
+/* PRINT */
+function installPrintProgram(eventBus, terminal) {
+  eventBus.on("print", ({ text, options }) => terminal.print(text, options));
+  eventBus.on("help:print", () => {
+    terminal.print("print.js: core printing and color support.");
+  });
+}
+
+/* FS */
+function installFsProgram(eventBus, terminal, gssManager) {
+  eventBus.on("command", async ({ cmd, args }) => {
+    if (cmd === "ls") {
+      const path = args[0] || "/";
+      const files = await gssManager.listFiles(path);
+      files.forEach(f => terminal.print(`${f.name}  ${f.size}`));
+      return true;
+    }
+    if (cmd === "cat") {
+      const path = args[0];
+      if (!path) { terminal.print("usage: cat <path>", { color: "#f55" }); return true; }
+      const content = await gssManager.readFile(path);
+      if (content == null) terminal.print("not found", { color: "#f55" });
+      else terminal.print(content);
+      return true;
+    }
+    if (cmd === "write") {
+      const path = args[0];
+      const text = args.slice(1).join(" ");
+      if (!path) { terminal.print("usage: write <path> <text>", { color: "#f55" }); return true; }
+      await gssManager.writeFile(path, text);
+      terminal.print(`wrote ${path}`, { color: "#5f5" });
+      return true;
+    }
+  });
+
+  eventBus.on("help:fs", () => {
+    terminal.print("Filesystem commands:");
+    terminal.print("  ls [path]");
+    terminal.print("  cat <path>");
+    terminal.print("  write <path> <text>");
+  });
+}
+
+/* PROG (authoring) */
+function installProgProgram(eventBus, terminal, gssManager, programLoader, gpkgInput) {
+  eventBus.on("command", async ({ cmd, args }) => {
+    if (cmd === "programs") {
+      const names = await gssManager.getProgramNames();
+      terminal.print("Installed programs:");
+      names.forEach(n => terminal.print("  " + n));
+      return true;
+    }
+
+    if (cmd === "prog") {
+      const sub = args[0];
+      const name = args[1];
+
+      if (!sub) {
+        terminal.print("usage: prog list|new|edit|build|run <name>", { color: "#f55" });
+        return true;
+      }
+
+      if (sub === "list") {
+        const srcNames = await gssManager.listProgramSourceNames();
+        terminal.print("Program sources:");
+        srcNames.forEach(n => terminal.print("  " + n));
+        return true;
+      }
+
+      if (sub === "new") {
+        if (!name) { terminal.print("usage: prog new <name>", { color: "#f55" }); return true; }
+        await gssManager.writeProgramSource(name, "manifest.json", JSON.stringify({
+          name,
+          version: "1.0.0"
+        }, null, 2));
+        await gssManager.writeProgramSource(name, "code.js", `export function init(api) {\n  // ${name} program\n}\n`);
+        terminal.print(`created program source '${name}'`, { color: "#5f5" });
+        return true;
+      }
+
+      if (sub === "edit") {
+        if (!name) { terminal.print("usage: prog edit <name>", { color: "#f55" }); return true; }
+        const code = await gssManager.readProgramSource(name, "code.js") || "";
+        terminal.print(`--- current code for ${name} ---`);
+        terminal.print(code);
+        terminal.print("--- editing: use 'write /program-src/" + name + "/code.js <code>' ---", { color: "#ff5" });
+        return true;
+      }
+
+      if (sub === "build") {
+        if (!name) { terminal.print("usage: prog build <name>", { color: "#f55" }); return true; }
+        const manifestText = await gssManager.readProgramSource(name, "manifest.json");
+        const codeText = await gssManager.readProgramSource(name, "code.js");
+        if (!manifestText || !codeText) {
+          terminal.print("missing manifest or code for " + name, { color: "#f55" });
+          return true;
+        }
+        const zip = new JSZip();
+        zip.file("manifest.json", manifestText);
+        zip.file("code.js", codeText);
+        const arrayBuffer = await zip.generateAsync({ type: "arraybuffer" });
+        await gssManager.installProgramFromBytes(name, arrayBuffer);
+        terminal.print(`built and installed ${name}.gpkg into .gss`, { color: "#5f5" });
+        await programLoader.loadProgram(name);
+        return true;
+      }
+
+      if (sub === "run") {
+        if (!name) { terminal.print("usage: prog run <name>", { color: "#f55" }); return true; }
+        await programLoader.loadProgram(name);
+        terminal.print(`loaded program ${name}`, { color: "#5f5" });
+        return true;
+      }
+
+      return true;
+    }
+
+    if (cmd === "install") {
+      const name = args[0];
+      if (!name) { terminal.print("usage: install <name>", { color: "#f55" }); return true; }
+
+      gpkgInput.onchange = async e => {
+        const file = e.target.files[0];
+        if (!file) return;
+        const arrayBuffer = await file.arrayBuffer();
+        await gssManager.installProgramFromBytes(name, arrayBuffer);
+        terminal.print(`installed program '${name}' into .gss`, { color: "#5f5" });
+        await programLoader.loadProgram(name);
+      };
+      gpkgInput.click();
+      return true;
+    }
+  });
+
+  eventBus.on("help:prog", () => {
+    terminal.print("Program authoring commands:");
+    terminal.print("  prog list");
+    terminal.print("  prog new <name>");
+    terminal.print("  prog edit <name>");
+    terminal.print("  prog build <name>");
+    terminal.print("  prog run <name>");
+    terminal.print("  programs (list installed .gpkg)");
+    terminal.print("  install <name> (import .gpkg from disk)");
+  });
+}
+
+/* REQUESTS RUNTIME */
+function installRequestsRuntime(eventBus, backend, gssManager, terminal) {
+  let polling = false;
+  let lastId = 0;
+
+  async function pollLoop() {
+    polling = true;
+    while (polling) {
+      try {
+        const res = await backend.pollRequests(lastId);
+        const meta = gssManager.getMeta();
+        if (!meta) continue;
+        const meUser = meta.username;
+        const meIp = meta.fakeIp;
+        (res.messages || []).forEach(m => {
+          lastId = Math.max(lastId, m.id || 0);
+          if (m.toUser && m.toUser !== meUser) return;
+          if (m.toIp && m.toIp !== meIp) return;
+          eventBus.emit("request:" + m.type, m);
+        });
+      } catch {}
+      await new Promise(r => setTimeout(r, 2000));
+    }
+  }
+
+  eventBus.on("command", async ({ cmd, args }) => {
+    if (cmd === "msg") {
+      const target = args[0];
+      const text = args.slice(1).join(" ");
+      if (!target || !text) {
+        terminal.print("usage: msg <user>-<ip> <text>", { color: "#f55" });
+        return true;
+      }
+      const [user, ip] = target.split("-");
+      const meta = gssManager.getMeta();
+      await backend.sendRequest(meta.username, meta.fakeIp, user, ip, "text", { text });
+      terminal.print(`[text] to ${user}-${ip}: ${text}`, { color: "#5cf" });
+      if (!polling) pollLoop();
+      return true;
+    }
+
+    if (cmd === "sendfile") {
+      const target = args[0];
+      const localPath = args[1];
+      if (!target || !localPath) {
+        terminal.print("usage: sendfile <user>-<ip>:/<path> <localpath>", { color: "#f55" });
+        return true;
+      }
+      const [userIp, remotePath] = target.split(":");
+      const [user, ip] = userIp.split("-");
+      const content = await gssManager.readFile(localPath);
+      if (content == null) {
+        terminal.print("local file not found", { color: "#f55" });
+        return true;
+      }
+      const meta = gssManager.getMeta();
+      await backend.sendRequest(meta.username, meta.fakeIp, user, ip, "file", {
+        filename: remotePath,
+        content
+      });
+      terminal.print(`[file] sent ${localPath} to ${user}-${ip}:${remotePath}`, { color: "#5cf" });
+      if (!polling) pollLoop();
+      return true;
+    }
+  });
+
+  eventBus.on("request:text", req => {
+    terminal.print(`[text] from ${req.fromUser}-${req.fromIp}: ${req.payload.text}`, { color: "#ccc" });
+  });
+
+  eventBus.on("request:file", async req => {
+    const path = req.payload.filename || `/inbox/file-${req.id}`;
+    await gssManager.writeFile(path, req.payload.content || "");
+    terminal.print(`[file] received ${path} from ${req.fromUser}-${req.fromIp}`, { color: "#ff5" });
+  });
+
+  eventBus.on("help:requests", () => {
+    terminal.print("Request commands:");
+    terminal.print("  msg <user>-<ip> <text>");
+    terminal.print("  sendfile <user>-<ip>:/<path> <localpath>");
+  });
+
+  eventBus.on("help-extra", () => {
+    terminal.print("requestsRuntime.js loaded (generic request system).");
+  });
+}
+
+/* ============================================================
+   BOOTSTRAP
+============================================================ */
+
+const BACKEND_BASE = "https://gss-request-bus.yourname.workers.dev"; // set your Worker URL
 
 const screen = document.getElementById("screen");
 const fileInput = document.getElementById("file-input");
@@ -71,26 +693,14 @@ const terminal = createTerminal(screen, eventBus, gssManager, programLoader);
 
 installPrintProgram(eventBus, terminal);
 installFsProgram(eventBus, terminal, gssManager);
-installHttpsProgram(eventBus, backend, terminal);
 installProgProgram(eventBus, terminal, gssManager, programLoader, gpkgInput);
 installRequestsRuntime(eventBus, backend, gssManager, terminal);
 
 function banner() {
-  const meta = gssManager.getMeta();
-  const user = meta?.username || "unknown";
-  const ip = meta?.fakeIp || "0.0.0.0";
-  const oobe = meta?.oobeDone ? "Completed" : "Pending";
-
   terminal.print("──────────────────────────────────────────────");
   terminal.print("   GSS TERMINAL — LOCAL WORLD ENVIRONMENT");
   terminal.print("──────────────────────────────────────────────");
-  terminal.print(`User: ${user}    IP: ${ip}`);
-  terminal.print(`OOBE: ${oobe}`);
-  terminal.print("");
   terminal.print("Type 'help' for commands.");
-  terminal.print("Type 'prog list' to see editable programs.");
-  terminal.print("Type 'programs' to see installed .gpkg packages.");
-  terminal.print("──────────────────────────────────────────────");
   terminal.print("");
 }
 
