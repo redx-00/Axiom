@@ -176,17 +176,31 @@ function createInputLine() {
 
 /* ---------- Graphics ---------- */
 
-function enableGraphics(width, height) {
+function enableGraphics() {
   if (!canvas) {
     canvas = document.createElement("canvas");
-    canvas.width = width;
-    canvas.height = height;
-    canvas.style.pointerEvents = "none";
+    canvas.style.position = "absolute";
+    canvas.style.top = "0";
+    canvas.style.left = "0";
+    canvas.style.width = "100vw";
+    canvas.style.height = "100vh";
+    canvas.style.pointerEvents = "none"; // world can enable if needed
     document.body.appendChild(canvas);
+
     ctx = canvas.getContext("2d");
+
+    function resize() {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+    }
+
+    resize();
+    window.addEventListener("resize", resize);
   }
+
   return ctx;
 }
+
 
 /* ---------- Mouse ---------- */
 
