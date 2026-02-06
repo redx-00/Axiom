@@ -15,22 +15,36 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    cursor: none;
+    cursor: none; /* hidden by default */
   }
-  #loader { text-align: center; }
+  #loader {
+    text-align: center;
+  }
   #screen {
     display: none;
     position: absolute;
-    top: 0; left: 0;
+    top: 0;
+    left: 0;
     box-sizing: border-box;
     padding: 12px;
-    height: 100%; width: 100%;
+    height: 100%;
+    width: 100%;
     overflow-y: auto;
     white-space: pre-wrap;
     background: #000;
     color: #fff;
   }
-  #file-input { display: none; }
+  #file-input {
+    display: none;
+  }
+  canvas {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    pointer-events: none;
+  }
 </style>
 </head>
 <body>
@@ -42,21 +56,33 @@
 </div>
 <div id="screen"></div>
 <input id="file-input" type="file" accept=".ax" />
+
 <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 <script type="module">
+/* ============================================================
+   CORE ELEMENTS
+============================================================ */
 const loader = document.getElementById("loader");
 const screen = document.getElementById("screen");
 const fileInput = document.getElementById("file-input");
 const loadBtn = document.getElementById("load-btn");
 
-let mode = "loader"; // loader | bios | world
+let mode = "loader"; // loader | bios | world-text | world-graphics
 let inputCallback = null;
 let inputLine = null;
 let inputBox = null;
 let inputStyle = { fg: null, bg: null };
-let currentWorldId = "none";
 
-/* ---------- storage API ---------- */
+let currentWorldId = "none";
+let currentConfig = null;
+
+let canvas = null;
+let ctx = null;
+let mouseEnabled = false;
+
+/* ============================================================
+   STORAGE API
+============================================================ */
 function makeStorage(prefix) {
   return {
     set(key, value) {
@@ -83,13 +109,17 @@ function makeStorage(prefix) {
   };
 }
 
-/* ---------- text UI primitives ---------- */
+/* ============================================================
+   TEXT UI PRIMITIVES
+============================================================ */
 function clearScreen() {
   screen.innerHTML = "";
   inputLine = null;
   inputBox = null;
 }
+
 function print(text = "", opts = {}) {
+  if (mode !== "world-text" && mode !== "bios") return;
   const div = document.createElement("div");
   const span = document.createElement("span");
   span.textContent = text;
@@ -100,30 +130,36 @@ function print(text = "", opts = {}) {
   screen.scrollTop = screen.scrollHeight;
   attachInputLineIfNeeded();
 }
+
 function printError(label, err) {
   const msg = (err && err.stack) ? err.stack : String(err);
   print(`✖ ${label}:`, { color: "#f55" });
   print(msg, { color: "#f88" });
   print("");
 }
+
 function setTheme({ fg, bg }) {
   if (fg) screen.style.color = fg;
   if (bg) screen.style.backgroundColor = bg;
 }
+
 function setTitle(text) {
   document.title = text;
 }
+
 function applyInputStyle() {
   if (!inputBox) return;
   if (inputStyle.fg) inputBox.style.color = inputStyle.fg;
   if (inputStyle.bg) inputBox.style.backgroundColor = inputStyle.bg;
 }
+
 function attachInputLineIfNeeded() {
   if (!inputLine || !inputBox) return;
   if (inputLine.parentNode !== screen) screen.appendChild(inputLine);
   applyInputStyle();
   inputBox.focus();
 }
+
 function createInputLine() {
   if (inputLine) return;
   inputLine = document.createElement("div");
@@ -149,7 +185,97 @@ function createInputLine() {
   attachInputLineIfNeeded();
 }
 
-/* ---------- BIOS ---------- */
+/* ============================================================
+   GRAPHICS ENGINE
+============================================================ */
+function initGraphicsLayer() {
+  if (canvas) return;
+  canvas = document.createElement("canvas");
+  canvas.style.pointerEvents = "none";
+  document.body.appendChild(canvas);
+  ctx = canvas.getContext("2d");
+  function resize() {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+  }
+  resize();
+  window.addEventListener("resize", resize);
+}
+
+/* ============================================================
+   MOUSE HANDLING
+============================================================ */
+function enableMouse(options = {}) {
+  if (!currentConfig || currentConfig.mouse !== true) {
+    throw new Error("Mouse not allowed by init.axconf");
+  }
+  mouseEnabled = true;
+  document.body.style.cursor = options.cursor || "default";
+
+  const onMove = options.onMove || (() => {});
+  const onDown = options.onDown || (() => {});
+  const onUp = options.onUp || (() => {});
+
+  window.addEventListener("mousemove", e => {
+    if (!mouseEnabled) return;
+    onMove(e.clientX, e.clientY);
+  });
+
+  window.addEventListener("mousedown", e => {
+    if (!mouseEnabled) return;
+    onDown(e.clientX, e.clientY);
+  });
+
+  window.addEventListener("mouseup", e => {
+    if (!mouseEnabled) return;
+    onUp(e.clientX, e.clientY);
+  });
+}
+
+/* ============================================================
+   AXIOM API FOR WORLDS
+============================================================ */
+function makeAxiomAPI(worldId, config) {
+  const storage = makeStorage("axiom::" + worldId + "::");
+
+  const api = {
+    print,
+    clear: clearScreen,
+    onInput(fn) {
+      if (mode !== "world-text") {
+        throw new Error("onInput only valid in text mode");
+      }
+      inputCallback = fn;
+      if (!inputLine) createInputLine();
+    },
+    setTitle,
+    setTheme,
+    setInputStyle({ fg, bg }) {
+      inputStyle = { fg: fg || null, bg: bg || null };
+      applyInputStyle();
+    },
+    storage
+  };
+
+  api.enableGraphics = () => {
+    if (config.mode !== "graphics") {
+      throw new Error("Graphics mode not enabled in init.axconf");
+    }
+    if (mode !== "world-graphics") {
+      throw new Error("World is not running in graphics mode");
+    }
+    initGraphicsLayer();
+    return ctx;
+  };
+
+  api.enableMouse = enableMouse;
+
+  return api;
+}
+
+/* ============================================================
+   BIOS
+============================================================ */
 function enterBIOS() {
   mode = "bios";
   loader.style.display = "none";
@@ -157,6 +283,7 @@ function enterBIOS() {
   clearScreen();
   setTitle("Axiom BIOS");
   setTheme({ fg: "#ffcc00", bg: "#000000" });
+
   print("A X I O M   B I O S", { color: "#ff0" });
   print("--------------------");
   print("1. Storage");
@@ -165,12 +292,15 @@ function enterBIOS() {
   print("4. Exit BIOS");
   print("");
   print("Type a number and press Enter.");
+
   inputCallback = biosMainMenu;
   if (!inputLine) createInputLine();
 }
+
 function biosPrompt() {
   print("BIOS> ", { color: "#ff0" });
 }
+
 function biosMainMenu(line) {
   if (line === undefined) { biosPrompt(); return; }
   const choice = line.trim();
@@ -202,7 +332,6 @@ function biosMainMenu(line) {
     inputCallback = biosDanger;
     biosPrompt();
   } else if (choice === "4") {
-    // exit BIOS back to loader
     mode = "loader";
     screen.style.display = "none";
     loader.style.display = "block";
@@ -214,6 +343,7 @@ function biosMainMenu(line) {
     biosPrompt();
   }
 }
+
 function biosDanger(line) {
   const cmd = (line || "").trim().toUpperCase();
   if (cmd === "WIPE") {
@@ -234,88 +364,110 @@ function biosDanger(line) {
   biosPrompt();
 }
 
-/* ---------- world API wrapper ---------- */
-function makeAxiomAPI(worldId) {
-  const storage = makeStorage("axiom::" + worldId + "::");
-  return {
-    print,
-    clear: clearScreen,
-    onInput(fn) {
-      inputCallback = fn;
-      if (!inputLine) createInputLine();
-    },
-    setTitle,
-    setTheme,
-    setInputStyle({ fg, bg }) {
-      inputStyle = { fg: fg || null, bg: bg || null };
-      applyInputStyle();
-    },
-    storage
-  };
-}
-
-/* ---------- .ax loader (new format) ---------- */
+/* ============================================================
+   NEW .ax FORMAT LOADER
+============================================================ */
+/*
+  Layout:
+  [0..7]   : "AXIOM\0\0" + version=1
+  [8..11]  : big-endian uint32 length of init.axconf JSON
+  [12..]   : init.axconf JSON (UTF-8)
+  [..end]  : ZIP payload
+*/
 async function loadAxWorld(file) {
   const buf = await file.arrayBuffer();
   const view = new DataView(buf);
-  // header: "AXIOM\0\0" + version=1
+
   const magic = [0x41,0x58,0x49,0x4F,0x4D,0x00,0x00,0x01];
   for (let i = 0; i < magic.length; i++) {
-    if (view.getUint8(i) !== magic[i]) throw new Error("Invalid AX header");
+    if (view.getUint8(i) !== magic[i]) {
+      throw new Error("Invalid AX header");
+    }
   }
-  const manifestLen = view.getUint32(8, false); // big-endian
-  const manifestStart = 12;
-  const manifestEnd = manifestStart + manifestLen;
-  const manifestBytes = new Uint8Array(buf, manifestStart, manifestLen);
-  const manifestText = new TextDecoder("utf-8").decode(manifestBytes);
-  const manifest = JSON.parse(manifestText);
-  currentWorldId = manifest.id || "world";
-  const zipBuf = buf.slice(manifestEnd);
+
+  const confLen = view.getUint32(8, false); // big-endian
+  const confStart = 12;
+  const confEnd = confStart + confLen;
+  const confBytes = new Uint8Array(buf, confStart, confLen);
+  const confText = new TextDecoder("utf-8").decode(confBytes);
+  const config = JSON.parse(confText);
+  currentConfig = config;
+  currentWorldId = config.id || "world";
+
+  const zipBuf = buf.slice(confEnd);
   const zip = await JSZip.loadAsync(zipBuf);
-  const entryPath = manifest.entry || "main.js";
-  const configPath = manifest.config || "init.axconf";
+
+  const entryPath = config.entry || "main.js";
   const entryFile = zip.file(entryPath);
   if (!entryFile) throw new Error("Missing entry script: " + entryPath);
-  // config is optional for now
+
   const code = await entryFile.async("string");
   const blob = new Blob([code], { type: "text/javascript" });
   const url = URL.createObjectURL(blob);
+
   let mod;
   try {
     mod = await import(url);
   } finally {
     URL.revokeObjectURL(url);
   }
+
   if (typeof mod.start !== "function") {
     throw new Error("Entry must export function start(axiom)");
   }
-  // switch to world mode
-  mode = "world";
-  loader.style.display = "none";
-  screen.style.display = "block";
-  clearScreen();
-  const axiom = makeAxiomAPI(currentWorldId);
+
+  // set mode
+  if (config.mode === "graphics") {
+    mode = "world-graphics";
+    loader.style.display = "none";
+    screen.style.display = "none"; // no text
+    initGraphicsLayer();
+  } else {
+    mode = "world-text";
+    loader.style.display = "none";
+    screen.style.display = "block";
+    clearScreen();
+  }
+
+  const axiom = makeAxiomAPI(currentWorldId, config);
+
   try {
     mod.start(axiom);
   } catch (err) {
-    printError("Error in start(axiom)", err);
+    if (mode === "world-text") {
+      printError("Error in start(axiom)", err);
+    } else {
+      // in graphics mode, fall back to text to show error
+      mode = "world-text";
+      screen.style.display = "block";
+      clearScreen();
+      printError("Error in start(axiom)", err);
+    }
   }
 }
 
-/* ---------- global error hooks ---------- */
+/* ============================================================
+   ERROR HOOKS
+============================================================ */
 window.onerror = (msg, src, line, col, err) => {
   screen.style.display = "block";
   loader.style.display = "none";
+  mode = "world-text";
   printError("Global error", err || msg);
 };
+
 window.onunhandledrejection = event => {
   screen.style.display = "block";
   loader.style.display = "none";
+  mode = "world-text";
   printError("Unhandled promise rejection", event.reason);
 };
 
-/* ---------- boot controls ---------- */
+/* ============================================================
+   BOOT CONTROLS
+============================================================ */
 loadBtn.onclick = () => fileInput.click();
+
 fileInput.onchange = async e => {
   const file = e.target.files[0];
   if (!file) return;
@@ -324,9 +476,12 @@ fileInput.onchange = async e => {
   } catch (err) {
     screen.style.display = "block";
     loader.style.display = "none";
+    mode = "world-text";
+    clearScreen();
     printError("Error loading .ax world", err);
   }
 };
+
 window.addEventListener("keydown", e => {
   if (e.key === "F2" && mode !== "bios") {
     enterBIOS();
